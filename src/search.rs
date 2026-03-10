@@ -1,7 +1,7 @@
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use crate::app::App;
+use crate::desktop_app::App;
 
 pub fn search_apps<'a>(apps: &'a [App], query: &str) -> Vec<&'a App> {
     let matcher = SkimMatcherV2::default();

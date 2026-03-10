@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct App {
     pub name: String,
     pub exec: String,
