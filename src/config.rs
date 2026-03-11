@@ -12,6 +12,7 @@ pub struct Config {
 pub struct WindowConfig {
     pub width: u32,
     pub height: u32,
+    pub max_height: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -32,6 +33,7 @@ impl Default for WindowConfig {
         Self {
             width: 500,
             height: 350,
+            max_height: 580,
         }
     }
 }
@@ -62,7 +64,10 @@ pub fn load_config() -> Config {
     if path.exists() {
         let content = fs::read_to_string(&path).unwrap();
         println!("using file config");
-        return toml::from_str(&content).unwrap_or_default();
+        match toml::from_str(&content) {
+            Ok(config) => return config,
+            Err(e) => println!("Error parsing config: {}", e),
+        }
     }
     println!("using default config");
     Config::default()
