@@ -94,6 +94,7 @@ fn build_layout(window: &ApplicationWindow, entry: &Entry, list: &ListBox) {
 fn apply_css(config: &config::Config) {
     let css = gtk::CssProvider::new();
     let bg = &config.colors.background;
+    let input_bg = &config.colors.input_background;
     let font_color = &config.font.font_color;
     let font_size = config.font.font_size;
     let accent = &config.colors.selected_item_color;
@@ -102,7 +103,7 @@ fn apply_css(config: &config::Config) {
     css.load_from_data(&format!(
         "
         entry {{
-            background: {bg};
+            background: {input_bg};
             border-radius: 12px;
             padding: 8px 12px;
             font-size: {font_size}px;

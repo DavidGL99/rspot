@@ -17,6 +17,7 @@ pub struct WindowConfig {
 #[derive(serde::Deserialize)]
 pub struct ColorsConfig {
     pub background: String,
+    pub input_background: String,
     pub opacity: f32,
     pub selected_item_color: String,
 }
@@ -40,7 +41,8 @@ impl Default for ColorsConfig {
     fn default() -> Self {
         Self {
             background: "#2b2b2b".to_string(),
-            opacity: 0.9,
+            input_background: "#2b2b2b".to_string(),
+            opacity: 1.0,
             selected_item_color: "#5294e2".to_string(),
         }
     }
