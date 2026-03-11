@@ -4,63 +4,103 @@ mod desktop_app;
 mod search;
 mod watcher;
 
-use desktop_app::get_apps;
-use gtk::EventControllerKey;
-use gtk::gdk;
-use gtk::{Application, ApplicationWindow, Box, Entry, Orientation};
-use gtk::{ListBox, prelude::*};
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
-use crate::config::load_config;
+use gtk::{
+    Application, ApplicationWindow, Box, Entry, EventControllerKey, ListBox, Orientation,
+    prelude::*,
+};
+
+use config::load_config;
+use desktop_app::get_apps;
 
 fn main() {
     let apps = Arc::new(Mutex::new(get_apps()));
-    let apps_for_watcher = apps.clone();
+    let config = load_config();
 
-    let (reload_sender, reload_receiver) = std::sync::mpsc::channel::<()>();
+    // Channel for D-Bus show events
+    let (dbus_sender, dbus_receiver) = mpsc::channel::<()>();
+    let dbus_receiver = Arc::new(Mutex::new(dbus_receiver));
+
+    // Channel for app reload events from filesystem watcher
+    let (reload_sender, reload_receiver) = mpsc::channel::<()>();
     let reload_receiver = Arc::new(Mutex::new(reload_receiver));
 
     watcher::watch_apps(reload_sender);
-    let config = load_config();
-
-    let (sender, receiver) = mpsc::channel::<()>();
-    let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+    spawn_dbus_server(dbus_sender);
 
     let app = Application::builder()
         .application_id("com.davidgl.rspot")
         .build();
 
     app.connect_activate(move |app| {
-        let window = ApplicationWindow::builder()
-            .application(app)
-            .title("rspot")
-            .decorated(false)
-            .default_width(config.window.width as i32)
-            .default_height(config.window.max_height as i32)
-            .build();
-
-        let apps_clone_reload = apps.clone();
-        let reload_receiver_clone = reload_receiver.clone();
-
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            if reload_receiver_clone.lock().unwrap().try_recv().is_ok() {
-                *apps_clone_reload.lock().unwrap() = get_apps();
-            }
-            gtk::glib::ControlFlow::Continue
-        });
-        let container = Box::new(Orientation::Vertical, 0);
+        let window = build_window(app, &config);
         let entry = Entry::new();
-        entry.set_placeholder_text(Some("Buscar aplicaciones..."));
-
         let list = ListBox::new();
-        list.set_visible(false);
 
-        let css = gtk::CssProvider::new();
-        let css_string = format!(
-            "
+        entry.set_placeholder_text(Some("Search applications..."));
+        list.set_visible(false);
+        list.add_css_class("navigation-sidebar");
+
+        apply_css(&config);
+        build_layout(&window, &entry, &list);
+        setup_reload_watcher(&apps, &reload_receiver);
+        setup_dbus_listener(&window, &dbus_receiver);
+        setup_key_controller(&window, &entry, &list);
+        setup_row_activated(&window, &entry, &list);
+        setup_search(&entry, &list, &apps);
+
+        window.connect_close_request(|w| {
+            w.hide();
+            gtk::glib::Propagation::Stop
+        });
+
+        // Show briefly so GTK calculates layout, then hide
+        window.present();
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(5), {
+            let w = window.clone();
+            move || w.hide()
+        });
+    });
+
+    app.run();
+}
+
+fn build_window(app: &Application, config: &config::Config) -> ApplicationWindow {
+    ApplicationWindow::builder()
+        .application(app)
+        .title("rspot")
+        .decorated(false)
+        .default_width(config.window.width as i32)
+        .default_height(config.window.max_height as i32)
+        .build()
+}
+
+fn build_layout(window: &ApplicationWindow, entry: &Entry, list: &ListBox) {
+    let outer = Box::new(Orientation::Vertical, 0);
+    outer.add_css_class("launcher-box");
+    outer.set_valign(gtk::Align::Start);
+    outer.set_margin_top(150);
+
+    let inner = Box::new(Orientation::Vertical, 8);
+    inner.add_css_class("launcher-content");
+    inner.append(entry);
+    inner.append(list);
+
+    outer.append(&inner);
+    window.set_child(Some(&outer));
+}
+
+fn apply_css(config: &config::Config) {
+    let css = gtk::CssProvider::new();
+    let bg = &config.colors.background;
+    let font_color = &config.font.font_color;
+    let font_size = config.font.font_size;
+    let accent = &config.colors.selected_item_color;
+    let opacity = config.colors.opacity;
+
+    css.load_from_data(&format!(
+        "
         entry {{
             background: {bg};
             border-radius: 12px;
@@ -70,247 +110,200 @@ fn main() {
             border: none;
             box-shadow: none;
         }}
-        
+        entry:focus, entry > text {{
+            box-shadow: none;
+            outline: none;
+        }}
         listbox {{
             background: {bg};
             border-radius: 12px;
             margin-top: 8px;
             color: {font_color};
         }}
-        
         listbox row {{
             padding: 4px 12px;
             border-radius: 8px;
         }}
-
         window {{
             background: transparent;
         }}
-        
         .launcher-box {{
             background: transparent;
             border-radius: 16px;
         }}
-
         .launcher-content {{
             background: {bg};
             border-radius: 16px;
             padding: 8px;
-        }}
+            opacity: {opacity};
 
-        .launcher-content listbox {{
+        }}
+        .launcher-content listbox,
+        .launcher-content listbox > row:not(:selected) {{
             background: {bg};
             background-color: {bg};
             color: {font_color};
         }}
-
-        .launcher-content listbox > row:not(:selected) {{
-            background: {bg};
-            background-color: {bg};
-        }}
-
         .selected-row {{
             background-color: {accent};
             color: {font_color};
         }}
+        * {{ outline: none; }}
+    "
+    ));
 
-        entry:focus {{
-            box-shadow: none;
-            outline: none;
-        }}
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().unwrap(),
+        &css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
 
-        entry > text {{
-            box-shadow: none;
-        }}
+fn setup_reload_watcher(
+    apps: &Arc<Mutex<Vec<desktop_app::App>>>,
+    reload_receiver: &Arc<Mutex<mpsc::Receiver<()>>>,
+) {
+    let apps = apps.clone();
+    let reload_receiver = reload_receiver.clone();
 
-        * {{
-            outline: none;
-        }}
-        .launcher-content listbox row:selected {{
-            background-color: {accent};
-            color: {font_color};
-        }}
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        if reload_receiver.lock().unwrap().try_recv().is_ok() {
+            *apps.lock().unwrap() = get_apps();
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
 
-        listbox row:selected {{
-            background-color: {accent};
-            color: {font_color};
-        }}
+fn setup_dbus_listener(window: &ApplicationWindow, dbus_receiver: &Arc<Mutex<mpsc::Receiver<()>>>) {
+    let window = window.clone();
+    let dbus_receiver = dbus_receiver.clone();
 
-        .launcher-content listbox {{
-            background: {bg};
-            background-color: {bg};
-            color: {font_color};
-        }}
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        if dbus_receiver.lock().unwrap().try_recv().is_ok() {
+            window.show();
+            window.present();
+            window.grab_focus();
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
 
-        .launcher-content listbox > row:not(:selected) {{
-            background: {bg};
-            background-color: {bg};
-        }}
-        listbox, listbox row {{
-            background-color: {bg};
-            color: {font_color};
-        }}
-    ",
-            bg = config.colors.background,
-            font_size = config.font.font_size,
-            font_color = config.font.font_color,
-            accent = config.colors.selected_item_color,
-        );
+fn setup_key_controller(window: &ApplicationWindow, entry: &Entry, list: &ListBox) {
+    let key_controller = EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
-        css.load_from_data(&css_string);
+    let entry = entry.clone();
+    let list = list.clone();
+    let window_cln = window.clone();
 
-        gtk::style_context_add_provider_for_display(
-            &gtk::gdk::Display::default().unwrap(),
-            &css,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        list.add_css_class("navigation-sidebar");
-
-        let outer = Box::new(Orientation::Vertical, 0);
-        outer.add_css_class("launcher-box");
-        outer.set_valign(gtk::Align::Start);
-        outer.set_margin_top(150); // fijo desde arriba
-        let inner = Box::new(Orientation::Vertical, 8);
-        inner.add_css_class("launcher-content");
-
-        inner.append(&entry);
-        inner.append(&list);
-        outer.append(&inner);
-
-        window.set_child(Some(&outer));
-
-        let window_clone3 = window.clone();
-        let receiver_clone = receiver.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if receiver_clone.lock().unwrap().try_recv().is_ok() {
-                window_clone3.show();
-                window_clone3.present();
-                window_clone3.grab_focus();
-            }
-            gtk::glib::ControlFlow::Continue
-        });
-
-        let key_controller = EventControllerKey::new();
-        let list_clone2 = list.clone();
-        let apps_clone2 = apps.lock().unwrap().clone();
-        let entry_clone = entry.clone();
-        let window_clone = window.clone();
-
-        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
-
-        key_controller.connect_key_pressed(move |_, key, _, _| match key {
-            gtk::gdk::Key::Escape => {
-                window_clone.hide();
-                entry_clone.set_text("");
-                gtk::glib::Propagation::Stop
-            }
-            gtk::gdk::Key::Return => {
-                if let Some(row) = list_clone2.selected_row() {
-                    if let Some(child) = row.child() {
-                        let exec = child.widget_name().to_string();
-                        launch_app(&exec);
-                        window_clone.hide();
-                        entry_clone.set_text("");
-                    }
-                }
-                gtk::glib::Propagation::Stop
-            }
-            gtk::gdk::Key::Down => {
-                if list_clone2.is_visible() {
-                    let current = list_clone2.selected_row().map(|r| r.index()).unwrap_or(-1);
-
-                    // Quita clase de fila anterior
-                    if let Some(prev) = list_clone2.row_at_index(current) {
-                        prev.remove_css_class("selected-row");
-                    }
-
-                    let next = list_clone2.row_at_index(current + 1);
-                    if let Some(ref row) = next {
-                        row.add_css_class("selected-row");
-                    }
-                    list_clone2.select_row(next.as_ref());
-                }
-                gtk::glib::Propagation::Stop
-            }
-
-            gtk::gdk::Key::Up => {
-                if list_clone2.is_visible() {
-                    let current = list_clone2.selected_row().map(|r| r.index()).unwrap_or(1);
-
-                    if current <= 0 {
-                        // Quita clase y deselecciona
-                        if let Some(row) = list_clone2.row_at_index(0) {
-                            row.remove_css_class("selected-row");
-                        }
-                        list_clone2.unselect_all(); // ← deselecciona en el modelo
-                        entry_clone.grab_focus();
-                    } else {
-                        if let Some(curr) = list_clone2.row_at_index(current) {
-                            curr.remove_css_class("selected-row");
-                        }
-                        let prev = list_clone2.row_at_index(current - 1);
-                        if let Some(ref row) = prev {
-                            row.add_css_class("selected-row");
-                        }
-                        list_clone2.select_row(prev.as_ref());
-                    }
-                }
-                gtk::glib::Propagation::Stop
-            }
-            _ => gtk::glib::Propagation::Proceed,
-        });
-        let entry_clone2 = entry.clone();
-        let window_clone2 = window.clone();
-        list.connect_row_activated(move |_, row| {
-            if let Some(child) = row.child() {
-                let exec = child.widget_name().to_string();
-                launch_app(&exec);
-                window_clone2.hide();
-                entry_clone2.set_text("");
-            }
-        });
-        window.add_controller(key_controller);
-        let list_clone = list.clone();
-        let apps_clone = apps.lock().unwrap().clone();
-
-        entry.connect_changed(move |e| {
-            let query = e.text().to_string();
-
-            while let Some(child) = list_clone.first_child() {
-                list_clone.remove(&child);
-            }
-
-            if !query.is_empty() {
-                let results = search::search_apps(&apps_clone, &query);
-                for app in results.iter().take(10) {
-                    let row_box = Box::new(Orientation::Horizontal, 8);
-                    row_box.set_widget_name(&app.exec); // ← guarda el exec
-
-                    // Icono
-                    if let Some(path) = &app.icon_path {
-                        let image = gtk::Image::from_file(path);
-                        image.set_pixel_size(32);
-                        row_box.append(&image);
-                    }
-
-                    // Nombre
-                    let label = gtk::Label::new(Some(&app.name));
-                    label.set_halign(gtk::Align::Start);
-                    row_box.append(&label);
-
-                    list_clone.append(&row_box);
-                    list_clone.set_visible(true);
-                }
-            } else {
-                list_clone.set_visible(false);
-            }
-        });
-        window.connect_close_request(move |w| {
-            w.hide();
+    key_controller.connect_key_pressed(move |_, key, _, _| match key {
+        gtk::gdk::Key::Escape => {
+            window_cln.hide();
+            entry.set_text("");
             gtk::glib::Propagation::Stop
-        });
+        }
+        gtk::gdk::Key::Return => {
+            if let Some(row) = list.selected_row() {
+                if let Some(child) = row.child() {
+                    launch_app(&child.widget_name());
+                    window_cln.hide();
+                    entry.set_text("");
+                }
+            }
+            gtk::glib::Propagation::Stop
+        }
+        gtk::gdk::Key::Down => {
+            if list.is_visible() {
+                let current = list.selected_row().map(|r| r.index()).unwrap_or(-1);
+                if let Some(row) = list.row_at_index(current) {
+                    row.remove_css_class("selected-row");
+                }
+                if let Some(next) = list.row_at_index(current + 1) {
+                    next.add_css_class("selected-row");
+                    list.select_row(Some(&next));
+                }
+            }
+            gtk::glib::Propagation::Stop
+        }
+        gtk::gdk::Key::Up => {
+            if list.is_visible() {
+                let current = list.selected_row().map(|r| r.index()).unwrap_or(1);
+                if current <= 0 {
+                    if let Some(row) = list.row_at_index(0) {
+                        row.remove_css_class("selected-row");
+                    }
+                    list.unselect_all();
+                    entry.grab_focus();
+                } else {
+                    if let Some(curr) = list.row_at_index(current) {
+                        curr.remove_css_class("selected-row");
+                    }
+                    if let Some(prev) = list.row_at_index(current - 1) {
+                        prev.add_css_class("selected-row");
+                        list.select_row(Some(&prev));
+                    }
+                }
+            }
+            gtk::glib::Propagation::Stop
+        }
+        _ => gtk::glib::Propagation::Proceed,
     });
 
+    window.add_controller(key_controller);
+}
+
+fn setup_row_activated(window: &ApplicationWindow, entry: &Entry, list: &ListBox) {
+    let window = window.clone();
+    let entry = entry.clone();
+
+    list.connect_row_activated(move |_, row| {
+        if let Some(child) = row.child() {
+            launch_app(&child.widget_name());
+            window.hide();
+            entry.set_text("");
+        }
+    });
+}
+
+fn setup_search(entry: &Entry, list: &ListBox, apps: &Arc<Mutex<Vec<desktop_app::App>>>) {
+    let list = list.clone();
+    let apps = apps.lock().unwrap().clone();
+
+    entry.connect_changed(move |e| {
+        let query = e.text().to_string();
+
+        while let Some(child) = list.first_child() {
+            list.remove(&child);
+        }
+
+        if query.is_empty() {
+            list.set_visible(false);
+            return;
+        }
+
+        let results = search::search_apps(&apps, &query);
+        for app in results.iter().take(10) {
+            let row = Box::new(Orientation::Horizontal, 8);
+            row.set_widget_name(&app.exec);
+
+            if let Some(path) = &app.icon_path {
+                let image = gtk::Image::from_file(path);
+                image.set_pixel_size(32);
+                row.append(&image);
+            }
+
+            let label = gtk::Label::new(Some(&app.name));
+            label.set_halign(gtk::Align::Start);
+            row.append(&label);
+
+            list.append(&row);
+        }
+
+        list.set_visible(true);
+    });
+}
+
+fn spawn_dbus_server(sender: mpsc::Sender<()>) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -324,23 +317,23 @@ fn main() {
                 .build()
                 .await
                 .unwrap();
+
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             }
         });
     });
-
-    app.run();
 }
 
 fn launch_app(exec: &str) {
-    let clean_exec: Vec<&str> = exec
+    let args: Vec<&str> = exec
         .split_whitespace()
         .filter(|a| !a.starts_with('%'))
         .collect();
-    if !clean_exec.is_empty() {
-        std::process::Command::new(clean_exec[0])
-            .args(&clean_exec[1..])
+
+    if let Some((cmd, rest)) = args.split_first() {
+        std::process::Command::new(cmd)
+            .args(rest)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

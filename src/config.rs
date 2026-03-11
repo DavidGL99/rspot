@@ -11,7 +11,6 @@ pub struct Config {
 #[derive(serde::Deserialize)]
 pub struct WindowConfig {
     pub width: u32,
-    pub height: u32,
     pub max_height: u32,
 }
 
@@ -32,7 +31,6 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             width: 500,
-            height: 350,
             max_height: 580,
         }
     }
@@ -63,12 +61,10 @@ pub fn load_config() -> Config {
     let path = PathBuf::from(home).join(".config/rspot/config.toml");
     if path.exists() {
         let content = fs::read_to_string(&path).unwrap();
-        println!("using file config");
         match toml::from_str(&content) {
             Ok(config) => return config,
             Err(e) => println!("Error parsing config: {}", e),
         }
     }
-    println!("using default config");
     Config::default()
 }
