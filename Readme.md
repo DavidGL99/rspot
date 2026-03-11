@@ -59,16 +59,17 @@ Edit `~/.config/rspot/config.toml`:
 
 ```toml
 [window]
-width = 600
-max_height = 536
-
+width = 500
+height = 350
+max_height = 580
 [colors]
-background = "rgba(40, 40, 40, 0.95)"
-selected_item_color = "rgba(82, 148, 226, 0.8)"
-
+background = "rgba(90, 90, 90, 0.85)"
+opacity = 0.7
+selected_item_color = "#5294e2"
 [font]
 font_size = 14
 font_color = "#ffffff"
+
 ```
 
 Restart rspot after changing the config:
