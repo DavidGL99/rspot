@@ -13,7 +13,7 @@ cat > ~/.config/autostart/rspot.desktop << EOF
 [Desktop Entry]
 Type=Application
 Name=rspot
-Exec=WGPU_BACKEND=gl /usr/local/bin/rspot
+Exec=bash -c '/usr/local/bin/rspot'
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
