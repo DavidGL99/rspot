@@ -1,6 +1,6 @@
 # rspot
 
-A fast, minimal application launcher for Linux — inspired by macOS Spotlight. Built with Rust and GTK4.
+A fast, minimal application launcher for Fedora based Linux Distributions — inspired by macOS Spotlight. Built with Rust and GTK4.
 
 <img src="src/assets/image1.png" width="600"/>
 
